@@ -80,6 +80,32 @@ class CommunityCommentModel {
       if (post != null) 'post': post!.toJson(),
     };
   }
+
+  CommunityCommentModel copyWith({
+    String? id,
+    String? content,
+    String? postId,
+    String? userId,
+    String? parentId,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    int? repliesCount,
+    CommunityCommentUser? user,
+    CommunityCommentPostSummary? post,
+  }) {
+    return CommunityCommentModel(
+      id: id ?? this.id,
+      content: content ?? this.content,
+      postId: postId ?? this.postId,
+      userId: userId ?? this.userId,
+      parentId: parentId ?? this.parentId,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      repliesCount: repliesCount ?? this.repliesCount,
+      user: user ?? this.user,
+      post: post ?? this.post,
+    );
+  }
 }
 
 /// Author metadata in Comment response

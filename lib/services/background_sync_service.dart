@@ -348,7 +348,7 @@ class BackgroundSyncService {
         androidConfiguration: AndroidConfiguration(
           onStart: onBackgroundServiceStart,
           autoStart: true,
-          isForegroundMode: false,
+          isForegroundMode: true,
           notificationChannelId: AwesomeNotificationService.generalChannel,
           initialNotificationTitle: 'DesiLynks Sync',
           initialNotificationContent:

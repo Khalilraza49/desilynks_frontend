@@ -1109,6 +1109,23 @@ class CommunityViewModel extends ChangeNotifier {
   List<CommunityCommentModel> _activeComments = [];
   List<CommunityCommentModel> get activeComments => _activeComments;
 
+  // Threaded replies map: parentCommentId -> list of replies
+  final Map<String, List<CommunityCommentModel>> _repliesMap = {};
+  Map<String, List<CommunityCommentModel>> get repliesMap => _repliesMap;
+
+  // Set of parent comment IDs whose replies are currently expanded
+  final Set<String> _expandedReplies = {};
+  Set<String> get expandedReplies => _expandedReplies;
+
+  // Set of parent comment IDs currently fetching replies
+  final Set<String> _loadingReplies = {};
+  Set<String> get loadingReplies => _loadingReplies;
+
+  bool isRepliesExpanded(String commentId) => _expandedReplies.contains(commentId);
+  bool isLoadingReplies(String commentId) => _loadingReplies.contains(commentId);
+  List<CommunityCommentModel> getRepliesFor(String commentId) =>
+      _repliesMap[commentId] ?? [];
+
   bool _isLoadingComments = false;
   bool get isLoadingComments => _isLoadingComments;
 
@@ -1121,6 +1138,9 @@ class CommunityViewModel extends ChangeNotifier {
   Future<void> loadCommentsForPost(String postId) async {
     _isLoadingComments = true;
     _replyingToComment = null;
+    _repliesMap.clear();
+    _expandedReplies.clear();
+    _loadingReplies.clear();
     commentInputController.clear();
     notifyListeners();
 
@@ -1132,11 +1152,48 @@ class CommunityViewModel extends ChangeNotifier {
 
   void setReplyingTo(CommunityCommentModel? comment) {
     _replyingToComment = comment;
+    if (comment != null) {
+      final name = comment.user?.fullName.isNotEmpty == true
+          ? comment.user!.fullName
+          : (comment.user?.firstName ?? 'User');
+      if (comment.isReply) {
+        final mention = '@$name ';
+        if (!commentInputController.text.startsWith(mention)) {
+          commentInputController.text = '$mention${commentInputController.text}';
+          commentInputController.selection = TextSelection.fromPosition(
+            TextPosition(offset: commentInputController.text.length),
+          );
+        }
+      }
+    }
     notifyListeners();
   }
 
   void clearReplyingTo() {
     _replyingToComment = null;
+    notifyListeners();
+  }
+
+  /// Toggle expansion of threaded replies for a comment, fetching them if needed
+  Future<void> toggleReplies(String postId, String commentId) async {
+    if (_expandedReplies.contains(commentId)) {
+      _expandedReplies.remove(commentId);
+      notifyListeners();
+      return;
+    }
+
+    _expandedReplies.add(commentId);
+    if (!_repliesMap.containsKey(commentId) || _repliesMap[commentId]!.isEmpty) {
+      _loadingReplies.add(commentId);
+      notifyListeners();
+
+      final replies = await fetchPostComments(
+        postId: postId,
+        parentId: commentId,
+      );
+      _repliesMap[commentId] = replies;
+      _loadingReplies.remove(commentId);
+    }
     notifyListeners();
   }
 
@@ -1147,11 +1204,15 @@ class CommunityViewModel extends ChangeNotifier {
     final text = commentInputController.text.trim();
     if (text.isEmpty) return;
 
+    // If replying to a reply, attach to the top-level parent
+    final parentId = _replyingToComment?.parentId ?? _replyingToComment?.id;
+    final isReply = parentId != null && parentId.isNotEmpty;
+
     final newComment = CommunityCommentModel(
       id: 'c-${DateTime.now().millisecondsSinceEpoch}',
       postId: postId,
       userId: currentUser?.id ?? 'user-me',
-      parentId: _replyingToComment?.id,
+      parentId: parentId,
       content: text,
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
@@ -1163,7 +1224,31 @@ class CommunityViewModel extends ChangeNotifier {
       ),
     );
 
-    _activeComments.add(newComment);
+    if (isReply) {
+      // It's a reply! Add to the repliesMap under the parent comment
+      final list = List<CommunityCommentModel>.from(_repliesMap[parentId] ?? []);
+      list.add(newComment);
+      _repliesMap[parentId] = list;
+      _expandedReplies.add(parentId);
+
+      // Increment parent's repliesCount in _activeComments
+      final parentIdx = _activeComments.indexWhere((c) => c.id == parentId);
+      if (parentIdx != -1) {
+        _activeComments[parentIdx] = _activeComments[parentIdx].copyWith(
+          repliesCount: _activeComments[parentIdx].repliesCount + 1,
+        );
+      }
+    } else {
+      // Top-level comment
+      _activeComments.add(newComment);
+    }
+
+    // Increment post commentsCount
+    final pIndex = _posts.indexWhere((p) => p.id == postId);
+    if (pIndex != -1) {
+      _posts[pIndex].commentsCount += 1;
+    }
+
     commentInputController.clear();
     _replyingToComment = null;
     notifyListeners();
@@ -1172,33 +1257,76 @@ class CommunityViewModel extends ChangeNotifier {
     final created = await addComment(
       postId: postId,
       content: text,
-      parentId: newComment.parentId,
+      parentId: parentId,
     );
+
     if (created != null) {
-      final idx = _activeComments.indexWhere((c) => c.id == newComment.id);
-      if (idx != -1) {
-        _activeComments[idx] = created;
-        notifyListeners();
+      if (isReply) {
+        final list = List<CommunityCommentModel>.from(_repliesMap[parentId] ?? []);
+        final idx = list.indexWhere((c) => c.id == newComment.id);
+        if (idx != -1) {
+          list[idx] = created;
+          _repliesMap[parentId] = list;
+          notifyListeners();
+        }
+      } else {
+        final idx = _activeComments.indexWhere((c) => c.id == newComment.id);
+        if (idx != -1) {
+          _activeComments[idx] = created;
+          notifyListeners();
+        }
       }
     }
 
-    // Smooth scroll to bottom
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (commentsScrollController.hasClients) {
-        commentsScrollController.animateTo(
-          commentsScrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+    // Smooth scroll to bottom if top-level comment
+    if (!isReply) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (commentsScrollController.hasClients) {
+          commentsScrollController.animateTo(
+            commentsScrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
   }
 
-  Future<bool> deleteActiveComment(String commentId, {String? postId}) async {
-    final index = _activeComments.indexWhere((c) => c.id == commentId);
-    if (index == -1) return false;
+  Future<bool> deleteActiveComment(
+    String commentId, {
+    String? postId,
+    String? parentId,
+  }) async {
+    final bool isReply = parentId != null && parentId.isNotEmpty;
+    CommunityCommentModel? removed;
+    int index = -1;
 
-    final removed = _activeComments.removeAt(index);
+    if (isReply) {
+      final list = List<CommunityCommentModel>.from(_repliesMap[parentId] ?? []);
+      index = list.indexWhere((c) => c.id == commentId);
+      if (index != -1) {
+        removed = list.removeAt(index);
+        _repliesMap[parentId] = list;
+        // Decrement parent repliesCount
+        final parentIdx = _activeComments.indexWhere((c) => c.id == parentId);
+        if (parentIdx != -1) {
+          _activeComments[parentIdx] = _activeComments[parentIdx].copyWith(
+            repliesCount:
+                (_activeComments[parentIdx].repliesCount - 1).clamp(0, 999999),
+          );
+        }
+      }
+    } else {
+      index = _activeComments.indexWhere((c) => c.id == commentId);
+      if (index != -1) {
+        removed = _activeComments.removeAt(index);
+        _repliesMap.remove(commentId);
+        _expandedReplies.remove(commentId);
+      }
+    }
+
+    if (removed == null) return false;
+
     if (postId != null) {
       final pIndex = _posts.indexWhere((p) => p.id == postId);
       if (pIndex != -1) {
@@ -1212,13 +1340,38 @@ class CommunityViewModel extends ChangeNotifier {
       try {
         final success = await _communityRepository.deleteComment(commentId);
         if (!success) {
-          _activeComments.insert(index, removed);
+          // Re-insert on failure
+          if (parentId != null) {
+            final list = List<CommunityCommentModel>.from(_repliesMap[parentId] ?? []);
+            list.insert(index, removed);
+            _repliesMap[parentId] = list;
+            final parentIdx = _activeComments.indexWhere((c) => c.id == parentId);
+            if (parentIdx != -1) {
+              _activeComments[parentIdx] = _activeComments[parentIdx].copyWith(
+                repliesCount: _activeComments[parentIdx].repliesCount + 1,
+              );
+            }
+          } else {
+            _activeComments.insert(index, removed);
+          }
           notifyListeners();
           return false;
         }
         return true;
       } catch (e) {
-        _activeComments.insert(index, removed);
+        if (parentId != null) {
+          final list = List<CommunityCommentModel>.from(_repliesMap[parentId] ?? []);
+          list.insert(index, removed);
+          _repliesMap[parentId] = list;
+          final parentIdx = _activeComments.indexWhere((c) => c.id == parentId);
+          if (parentIdx != -1) {
+            _activeComments[parentIdx] = _activeComments[parentIdx].copyWith(
+              repliesCount: _activeComments[parentIdx].repliesCount + 1,
+            );
+          }
+        } else {
+          _activeComments.insert(index, removed);
+        }
         notifyListeners();
         return false;
       }

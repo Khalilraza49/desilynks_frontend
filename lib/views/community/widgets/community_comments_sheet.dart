@@ -54,8 +54,17 @@ class CommunityCommentsSheet extends StatelessWidget {
     final replyingTo = viewModel.replyingToComment;
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
 
-    final commentCount = comments.length > post.commentsCount
-        ? comments.length
+    final totalReplies = comments.fold<int>(
+      0,
+      (sum, c) {
+        final localReplies = viewModel.repliesMap[c.id]?.length ?? 0;
+        final count = localReplies > c.repliesCount ? localReplies : c.repliesCount;
+        return sum + count;
+      },
+    );
+    final totalComments = comments.length + totalReplies;
+    final commentCount = totalComments > post.commentsCount
+        ? totalComments
         : post.commentsCount;
 
     return DraggableScrollableSheet(
@@ -396,20 +405,66 @@ class CommunityCommentsSheet extends StatelessWidget {
                                                 ),
                                               ),
                                             ),
-                                            if (comment.repliesCount > 0) ...[
-                                              SizedBox(width: context.scale(12)),
-                                              Text(
-                                                '${comment.repliesCount} ${comment.repliesCount == 1 ? "reply" : "replies"}',
-                                                style: TextStyle(
-                                                  fontSize: context.sp(11.5),
-                                                  fontWeight: FontWeight.w500,
-                                                  color: const Color(0xFF64748B),
+                                            if (comment.repliesCount > 0 ||
+                                                viewModel.getRepliesFor(comment.id).isNotEmpty) ...[
+                                              SizedBox(width: context.scale(14)),
+                                              GestureDetector(
+                                                behavior: HitTestBehavior.opaque,
+                                                onTap: () => viewModel.toggleReplies(
+                                                  post.id,
+                                                  comment.id,
+                                                ),
+                                                child: Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    if (viewModel.isLoadingReplies(comment.id)) ...[
+                                                      SizedBox(
+                                                        width: context.scale(12),
+                                                        height: context.scale(12),
+                                                        child: const CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                          color: Color(0xFF4353E8),
+                                                        ),
+                                                      ),
+                                                      SizedBox(width: context.scale(6)),
+                                                    ],
+                                                    Text(
+                                                      viewModel.isRepliesExpanded(comment.id)
+                                                          ? 'Hide replies'
+                                                          : '${comment.repliesCount > 0 ? comment.repliesCount : viewModel.getRepliesFor(comment.id).length} ${((comment.repliesCount > 0 ? comment.repliesCount : viewModel.getRepliesFor(comment.id).length) == 1) ? "reply" : "replies"}',
+                                                      style: TextStyle(
+                                                        fontSize: context.sp(11.5),
+                                                        fontWeight: FontWeight.w600,
+                                                        color: const Color(0xFF4353E8),
+                                                      ),
+                                                    ),
+                                                    SizedBox(width: context.scale(2)),
+                                                    Icon(
+                                                      viewModel.isRepliesExpanded(comment.id)
+                                                          ? Icons.keyboard_arrow_up
+                                                          : Icons.keyboard_arrow_down,
+                                                      size: context.scale(16),
+                                                      color: const Color(0xFF4353E8),
+                                                    ),
+                                                  ],
                                                 ),
                                               ),
                                             ],
                                           ],
                                         ),
                                       ),
+                                      if (viewModel.isRepliesExpanded(comment.id)) ...[
+                                        SizedBox(height: context.scaleH(8)),
+                                        ...viewModel
+                                            .getRepliesFor(comment.id)
+                                            .map((reply) => _buildReplyItem(
+                                                  context: context,
+                                                  viewModel: viewModel,
+                                                  currentUser: currentUser,
+                                                  parentComment: comment,
+                                                  reply: reply,
+                                                )),
+                                      ],
                                     ],
                                   ),
                                 ),
@@ -540,8 +595,9 @@ class CommunityCommentsSheet extends StatelessWidget {
   Future<void> _confirmDeleteComment(
     BuildContext context,
     CommunityViewModel viewModel,
-    CommunityCommentModel comment,
-  ) async {
+    CommunityCommentModel comment, {
+    String? parentId,
+  }) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -566,7 +622,164 @@ class CommunityCommentsSheet extends StatelessWidget {
       ),
     );
     if (confirmed == true && context.mounted) {
-      await viewModel.deleteActiveComment(comment.id, postId: post.id);
+      await viewModel.deleteActiveComment(
+        comment.id,
+        postId: post.id,
+        parentId: parentId,
+      );
     }
+  }
+
+  Widget _buildReplyItem({
+    required BuildContext context,
+    required CommunityViewModel viewModel,
+    required dynamic currentUser,
+    required CommunityCommentModel parentComment,
+    required CommunityCommentModel reply,
+  }) {
+    final isMe = (currentUser != null &&
+        (reply.userId == currentUser.id || reply.user?.id == currentUser.id));
+
+    final String? photoUrl =
+        reply.user?.profilePhotoUrl ?? (isMe ? currentUser?.profilePhotoUrl : null);
+
+    final String authorName = reply.user?.fullName.isNotEmpty == true
+        ? reply.user!.fullName
+        : (isMe
+            ? (currentUser != null && currentUser.fullName.isNotEmpty
+                ? currentUser.fullName
+                : 'You')
+            : 'User');
+
+    return Padding(
+      padding: EdgeInsets.only(
+        top: context.scaleH(8),
+        bottom: context.scaleH(4),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          UserAvatar(
+            photoUrl: photoUrl,
+            size: context.scale(28),
+            fallbackBgColor: AppColors.lightBlue,
+            fallbackIconColor: AppColors.primaryBlue,
+          ),
+          SizedBox(width: context.scale(8)),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      authorName,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: context.sp(13),
+                        color: AppColors.slate900,
+                      ),
+                    ),
+                    SizedBox(width: context.scale(6)),
+                    Text(
+                      CommunityPostModel.formatTimeAgo(reply.createdAt),
+                      style: TextStyle(
+                        fontSize: context.sp(11),
+                        color: const Color(0xFF94A3B8),
+                      ),
+                    ),
+                    const Spacer(),
+                    if (isMe)
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _confirmDeleteComment(
+                          context,
+                          viewModel,
+                          reply,
+                          parentId: parentComment.id,
+                        ),
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: context.scale(4),
+                          ),
+                          child: SvgPicture.asset(
+                            AppIcons.deleteSvg,
+                            width: context.scale(13),
+                            height: context.scale(13),
+                            colorFilter: const ColorFilter.mode(
+                              Color(0xFFEF4444),
+                              BlendMode.srcIn,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (!isMe)
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          ReportBottomSheet.show(
+                            context,
+                            targetType: ReportTargetType.communityComment,
+                            targetId: reply.id,
+                            targetOwnerId: reply.userId,
+                            targetTitle: 'Report Comment',
+                          );
+                        },
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: context.scale(4),
+                          ),
+                          child: Icon(
+                            Icons.flag_outlined,
+                            size: context.scale(13),
+                            color: AppColors.slate400,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                SizedBox(height: context.scaleH(4)),
+                Container(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: context.scale(14),
+                    vertical: context.scaleH(10),
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(context.scale(14)),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: Text(
+                    reply.content,
+                    style: TextStyle(
+                      fontSize: context.sp(13),
+                      color: AppColors.slate800,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.only(
+                    top: context.scaleH(4),
+                    left: context.scale(4),
+                  ),
+                  child: GestureDetector(
+                    onTap: () => viewModel.setReplyingTo(reply),
+                    child: Text(
+                      'Reply',
+                      style: TextStyle(
+                        fontSize: context.sp(12),
+                        fontWeight: FontWeight.w700,
+                        color: const Color(0xFF4353E8),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
